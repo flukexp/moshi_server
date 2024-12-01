@@ -1,6 +1,8 @@
 import asyncio
 import torch
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import hf_hub_download
 from moshi.models import loaders, LMGen
 import sentencepiece
@@ -78,66 +80,73 @@ async def status():
 async def websocket(ws: WebSocket):
     with torch.no_grad():
         await ws.accept()
-
-        # Clear model chat history and any buffered audio
         moshi.reset_state()
-
         print("Session started")
-
-        # Task definitions
         tasks = []
+        websocket_closed = False
 
         async def recv_loop():
-            while True:
-                try:
+            nonlocal websocket_closed
+            try:
+                while not websocket_closed:
                     data = await ws.receive_bytes()
                     if not data:
                         print("Received empty message")
                         continue
                     moshi.opus_stream_inbound.append_bytes(data)
-                except WebSocketDisconnect:
-                    print("Client disconnected in recv_loop")
-                    break
+            except WebSocketDisconnect:
+                websocket_closed = True
+                print("Client disconnected in recv_loop")
 
         async def inference_loop():
+            nonlocal websocket_closed
             all_pcm_data = None
-            while True:
-                await asyncio.sleep(0.001)
-                pcm = moshi.opus_stream_inbound.read_pcm()
-                if pcm is None or pcm.size == 0:
-                    continue
+            try:
+                while not websocket_closed:
+                    await asyncio.sleep(0.001)
+                    pcm = moshi.opus_stream_inbound.read_pcm()
+                    if pcm is None or pcm.size == 0:
+                        continue
 
-                if all_pcm_data is None:
-                    all_pcm_data = pcm
-                else:
-                    all_pcm_data = np.concatenate((all_pcm_data, pcm))
+                    if all_pcm_data is None:
+                        all_pcm_data = pcm
+                    else:
+                        all_pcm_data = np.concatenate((all_pcm_data, pcm))
 
-                while all_pcm_data.shape[-1] >= moshi.frame_size:
-                    chunk = all_pcm_data[: moshi.frame_size]
-                    all_pcm_data = all_pcm_data[moshi.frame_size:]
-                    chunk = torch.from_numpy(chunk).to(device=moshi.device)[None, None]
+                    while all_pcm_data.shape[-1] >= moshi.frame_size:
+                        chunk = all_pcm_data[: moshi.frame_size]
+                        all_pcm_data = all_pcm_data[moshi.frame_size:]
+                        chunk = torch.from_numpy(chunk).to(device=moshi.device)[None, None]
 
-                    codes = moshi.mimi.encode(chunk)
-                    for c in range(codes.shape[-1]):
-                        tokens = moshi.lm_gen.step(codes[:, :, c:c+1])
-                        if tokens is None:
-                            continue
+                        codes = moshi.mimi.encode(chunk)
+                        for c in range(codes.shape[-1]):
+                            tokens = moshi.lm_gen.step(codes[:, :, c:c+1])
+                            if tokens is None:
+                                continue
 
-                        main_pcm = moshi.mimi.decode(tokens[:, 1:]).cpu()
-                        moshi.opus_stream_outbound.append_pcm(main_pcm[0, 0].numpy())
+                            main_pcm = moshi.mimi.decode(tokens[:, 1:]).cpu()
+                            moshi.opus_stream_outbound.append_pcm(main_pcm[0, 0].detach().numpy())
 
-                        text_token = tokens[0, 0, 0].item()
-                        if text_token not in (0, 3):
-                            text = moshi.text_tokenizer.id_to_piece(text_token).replace("▁", " ")
-                            await ws.send_bytes(b"\x02" + bytes(text, "utf-8"))
+                            text_token = tokens[0, 0, 0].item()
+                            if text_token not in (0, 3):
+                                text = moshi.text_tokenizer.id_to_piece(text_token).replace("▁", " ")
+                                await ws.send_bytes(b"\x02" + bytes(text, "utf-8"))
+            except Exception as e:
+                websocket_closed = True
+                print(f"Inference loop error: {e}")
 
         async def send_loop():
-            while True:
-                await asyncio.sleep(0.001)
-                msg = moshi.opus_stream_outbound.read_bytes()
-                if msg is None or len(msg) == 0:
-                    continue
-                await ws.send_bytes(b"\x01" + msg)
+            nonlocal websocket_closed
+            try:
+                while not websocket_closed:
+                    await asyncio.sleep(0.001)
+                    msg = moshi.opus_stream_outbound.read_bytes()
+                    if msg is None or len(msg) == 0:
+                        continue
+                    await ws.send_bytes(b"\x01" + msg)
+            except WebSocketDisconnect:
+                websocket_closed = True
+                print("Send loop disconnected")
 
         try:
             tasks = [
@@ -151,8 +160,8 @@ async def websocket(ws: WebSocket):
             print("WebSocket disconnected")
         except Exception as e:
             print(f"Unexpected error: {e}")
-            raise e
         finally:
+            websocket_closed = True
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
