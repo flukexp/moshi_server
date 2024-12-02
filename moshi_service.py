@@ -24,12 +24,12 @@ class MoshiService:
 
     def initialize(self):
         # Download models
-        mimi_weight = hf_hub_download(loaders.DEFAULT_REPO, loaders.MIMI_NAME)
+        mimi_weight = hf_hub_download("kyutai/moshika-pytorch-bf16", loaders.MIMI_NAME)
         self.mimi = loaders.get_mimi(mimi_weight, device=self.device)
         self.mimi.set_num_codebooks(8)
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
 
-        moshi_weight = hf_hub_download(loaders.DEFAULT_REPO, loaders.MOSHI_NAME)
+        moshi_weight = hf_hub_download("kyutai/moshika-pytorch-bf16", loaders.MOSHI_NAME)
         self.moshi = loaders.get_moshi_lm(moshi_weight, device=self.device)
         self.lm_gen = LMGen(
             self.moshi,
@@ -43,7 +43,7 @@ class MoshiService:
         self.lm_gen.streaming_forever(1)
 
         tokenizer_config = hf_hub_download(
-            loaders.DEFAULT_REPO, loaders.TEXT_TOKENIZER_NAME
+            "kyutai/moshika-pytorch-bf16", loaders.TEXT_TOKENIZER_NAME
         )
         self.text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_config)
 
