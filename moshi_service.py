@@ -12,6 +12,15 @@ import numpy as np
 # Initialize the FastAPI app
 app = FastAPI()
 
+# Configure CORS settings
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all HTTP methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 class MoshiService:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
